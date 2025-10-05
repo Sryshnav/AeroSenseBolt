@@ -6,10 +6,12 @@ import ChatInterface, { Message } from './components/ChatInterface';
 import ProvenancePanel from './components/ProvenancePanel';
 import ForecastChart from './components/ForecastChart';
 import AlertsPanel from './components/AlertsPanel';
+import LocationSearch from './components/LocationSearch';
 import { AirQualityData, Forecast, Alert } from './types/airQuality';
 import { fetchAirQualityData, fetchForecast, getDataSources } from './services/airQualityService';
 import { sendToGemini } from './services/geminiService';
 import { SpeechService } from './services/speechService';
+import { fetchWeatherData } from './services/weatherService';
 
 function App() {
   const [airQualityData, setAirQualityData] = useState<AirQualityData[]>([]);
@@ -22,19 +24,21 @@ function App() {
   const [highlightArea, setHighlightArea] = useState<{ lat: number; lon: number } | undefined>();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [lastUpdate, setLastUpdate] = useState(new Date());
+  const [currentLocation, setCurrentLocation] = useState({ lat: 9.9312, lon: 76.2673, name: 'Kochi, India' });
+  const [isLoadingData, setIsLoadingData] = useState(true);
 
   const speechServiceRef = useRef<SpeechService | null>(null);
 
   useEffect(() => {
     speechServiceRef.current = new SpeechService();
-    loadAirQualityData();
+    loadAirQualityData(currentLocation.lat, currentLocation.lon);
 
     const interval = setInterval(() => {
-      loadAirQualityData();
+      loadAirQualityData(currentLocation.lat, currentLocation.lon);
     }, 30000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [currentLocation]);
 
   useEffect(() => {
     if (airQualityData.length > 0 && !selectedLocation) {
@@ -43,10 +47,17 @@ function App() {
     }
   }, [airQualityData]);
 
-  const loadAirQualityData = async () => {
-    const data = await fetchAirQualityData();
-    setAirQualityData(data);
-    setLastUpdate(new Date());
+  const loadAirQualityData = async (lat: number, lon: number) => {
+    setIsLoadingData(true);
+    try {
+      const data = await fetchAirQualityData(lat, lon);
+      setAirQualityData(data);
+      setLastUpdate(new Date());
+    } catch (error) {
+      console.error('Failed to load air quality data:', error);
+    } finally {
+      setIsLoadingData(false);
+    }
   };
 
   const loadForecast = async (lat: number, lon: number) => {
@@ -57,6 +68,11 @@ function App() {
   const handleLocationSelect = (location: AirQualityData) => {
     setSelectedLocation(location);
     loadForecast(location.lat, location.lon);
+  };
+
+  const handleLocationChange = async (lat: number, lon: number, name: string) => {
+    setCurrentLocation({ lat, lon, name });
+    await loadAirQualityData(lat, lon);
   };
 
   const handleSendMessage = async (content: string) => {
@@ -73,12 +89,19 @@ function App() {
     try {
       if (!selectedLocation) return;
 
+      const weather = await fetchWeatherData(selectedLocation.lat, selectedLocation.lon);
+
       const response = await sendToGemini(content, {
         location: selectedLocation.location,
         pm25: selectedLocation.pm25,
         no2: selectedLocation.no2,
         o3: selectedLocation.o3,
         aqi: selectedLocation.aqi,
+        weather: weather ? {
+          temperature: weather.temperature,
+          humidity: weather.humidity,
+          windSpeed: weather.windSpeed,
+        } : undefined,
       });
 
       const assistantMessage: Message = {
@@ -144,19 +167,27 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-900">
       <header className="bg-slate-800 border-b border-slate-700 px-6 py-4">
-        <div className="max-w-[1800px] mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg flex items-center justify-center">
-              <Wind className="w-6 h-6 text-white" />
+        <div className="max-w-[1800px] mx-auto">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg flex items-center justify-center">
+                <Wind className="w-6 h-6 text-white" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold text-white">AeroSense</h1>
+                <p className="text-sm text-gray-400">Your Air Quality Guardian</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-2xl font-bold text-white">AeroSense</h1>
-              <p className="text-sm text-gray-400">Your Air Quality Guardian</p>
+            <div className="text-right">
+              <p className="text-sm text-gray-400">Live Monitoring</p>
+              <p className="text-xs text-gray-500">Updates every 30 seconds</p>
             </div>
           </div>
-          <div className="text-right">
-            <p className="text-sm text-gray-400">Live Monitoring</p>
-            <p className="text-xs text-gray-500">Updates every 30 seconds</p>
+          <div className="max-w-2xl">
+            <LocationSearch
+              onLocationSelect={handleLocationChange}
+              currentLocation={currentLocation.name}
+            />
           </div>
         </div>
       </header>

@@ -1,12 +1,7 @@
 import { AirQualityData, Forecast, DataSource } from '../types/airQuality';
-
-const MOCK_LOCATIONS = [
-  { name: 'Kochi City Center', lat: 9.9312, lon: 76.2673, pm25: 82, no2: 20, o3: 45 },
-  { name: 'Marine Drive', lat: 9.9667, lon: 76.2833, pm25: 65, no2: 18, o3: 52 },
-  { name: 'Edappally', lat: 10.0167, lon: 76.3083, pm25: 95, no2: 28, o3: 38 },
-  { name: 'Fort Kochi', lat: 9.9658, lon: 76.2433, pm25: 58, no2: 15, o3: 48 },
-  { name: 'Kakkanad', lat: 10.0064, lon: 76.3525, pm25: 78, no2: 22, o3: 42 },
-];
+import { fetchOpenAQData, extractPollutantValue, OpenAQLocation } from './openaqService';
+import { fetchAirPollutionData, fetchAirPollutionForecast } from './weatherService';
+import { fetchNASATempoData } from './nasaService';
 
 function calculateAQI(pm25: number, no2: number, o3: number): number {
   const pm25AQI = (pm25 / 15) * 50;
@@ -15,24 +10,87 @@ function calculateAQI(pm25: number, no2: number, o3: number): number {
   return Math.round(Math.max(pm25AQI, no2AQI, o3AQI));
 }
 
-export async function fetchAirQualityData(): Promise<AirQualityData[]> {
-  await new Promise(resolve => setTimeout(resolve, 500));
+export async function fetchAirQualityData(
+  lat: number = 9.9312,
+  lon: number = 76.2673
+): Promise<AirQualityData[]> {
+  try {
+    const openaqLocations = await fetchOpenAQData(lat, lon, 50);
 
-  return MOCK_LOCATIONS.map(loc => ({
-    ...loc,
-    aqi: calculateAQI(loc.pm25, loc.no2, loc.o3),
-    timestamp: new Date().toISOString(),
-    location: loc.name,
-  }));
+    if (!openaqLocations || openaqLocations.length === 0) {
+      return [];
+    }
+
+    const airQualityData: AirQualityData[] = await Promise.all(
+      openaqLocations.slice(0, 10).map(async (location: OpenAQLocation) => {
+        const pm25 = extractPollutantValue(location.measurements, 'pm25') || 0;
+        const no2 = extractPollutantValue(location.measurements, 'no2') || 0;
+        const o3 = extractPollutantValue(location.measurements, 'o3') || 0;
+
+        const nasaData = await fetchNASATempoData(
+          location.coordinates.latitude,
+          location.coordinates.longitude
+        );
+
+        const finalNO2 = nasaData?.no2 || no2;
+        const finalO3 = nasaData?.o3 || o3;
+
+        return {
+          lat: location.coordinates.latitude,
+          lon: location.coordinates.longitude,
+          pm25: pm25,
+          no2: finalNO2,
+          o3: finalO3,
+          aqi: calculateAQI(pm25, finalNO2, finalO3),
+          timestamp: new Date().toISOString(),
+          location: location.name,
+        };
+      })
+    );
+
+    return airQualityData.filter(data => data.pm25 > 0 || data.no2 > 0 || data.o3 > 0);
+
+  } catch (error) {
+    console.error('Error fetching air quality data:', error);
+    return [];
+  }
 }
 
 export async function fetchForecast(lat: number, lon: number): Promise<Forecast[]> {
-  await new Promise(resolve => setTimeout(resolve, 300));
+  try {
+    const forecastData = await fetchAirPollutionForecast(lat, lon);
 
-  const baseData = MOCK_LOCATIONS.find(
-    loc => Math.abs(loc.lat - lat) < 0.1 && Math.abs(loc.lon - lon) < 0.1
-  ) || MOCK_LOCATIONS[0];
+    if (!forecastData || forecastData.length === 0) {
+      const currentData = await fetchAirPollutionData(lat, lon);
+      if (!currentData) return [];
 
+      return generateFallbackForecast(
+        currentData.components.pm2_5,
+        currentData.components.no2,
+        currentData.components.o3
+      );
+    }
+
+    return forecastData.map((data, index) => ({
+      timestamp: data.timestamp,
+      pm25: data.components.pm2_5,
+      no2: data.components.no2,
+      o3: data.components.o3,
+      aqi: calculateAQI(data.components.pm2_5, data.components.no2, data.components.o3),
+      confidence: 0.9 - index * 0.08,
+    }));
+
+  } catch (error) {
+    console.error('Error fetching forecast:', error);
+    return generateFallbackForecast(50, 20, 40);
+  }
+}
+
+function generateFallbackForecast(
+  basePM25: number,
+  baseNO2: number,
+  baseO3: number
+): Forecast[] {
   const forecasts: Forecast[] = [];
   const now = new Date();
 
@@ -40,16 +98,16 @@ export async function fetchForecast(lat: number, lon: number): Promise<Forecast[
     const futureTime = new Date(now.getTime() + i * 3600000);
     const variation = Math.sin(i * 0.5) * 15;
 
+    const pm25 = Math.max(10, basePM25 + variation);
+    const no2 = Math.max(5, baseNO2 + variation * 0.3);
+    const o3 = Math.max(20, baseO3 + variation * 0.5);
+
     forecasts.push({
       timestamp: futureTime.toISOString(),
-      pm25: Math.max(10, baseData.pm25 + variation),
-      no2: Math.max(5, baseData.no2 + variation * 0.3),
-      o3: Math.max(20, baseData.o3 + variation * 0.5),
-      aqi: calculateAQI(
-        Math.max(10, baseData.pm25 + variation),
-        Math.max(5, baseData.no2 + variation * 0.3),
-        Math.max(20, baseData.o3 + variation * 0.5)
-      ),
+      pm25,
+      no2,
+      o3,
+      aqi: calculateAQI(pm25, no2, o3),
       confidence: 0.85 - i * 0.08,
     });
   }
